@@ -1,9 +1,12 @@
 const fs = require('fs');
+const path = require('path');
 
+const { writeJSONSync } = require('fs-extra');
 const lodash = require('lodash');
 
 const exec = require('vx/exec');
 const logger = require('vx/logger');
+const packageNames = require('vx/packageNames');
 const getModuleAliases = require('vx/util/moduleAliases');
 const vxPath = require('vx/vxPath');
 
@@ -17,10 +20,18 @@ const paths = moduleAliases.reduce(
   {}
 );
 
-module.exports = function genTsConfig() {
-  const tsConfig = tsConfigTemplate();
+const pathPerPackage = moduleAliases.reduce((paths, currentModule) => {
+  paths[currentModule.package] = paths[currentModule.package] || {};
+  const rel = path.relative(
+    vxPath.package(currentModule.package),
+    currentModule.relative
+  );
+  paths[currentModule.package][currentModule.name] = [rel];
+  return paths;
+}, {});
 
-  tsConfig.compilerOptions.paths = paths;
+module.exports = function genTsConfig() {
+  const tsConfig = rootTsConfigTemplate(paths);
 
   if (!lodash.isEqual(prevTsConfig, tsConfig)) {
     logger.log('generating ts config');
@@ -29,9 +40,61 @@ module.exports = function genTsConfig() {
 
     exec(`yarn prettier ${vxPath.TSCONFIG_PATH} -w`);
   }
+
+  packageNames.list.forEach(packageName => {
+    const paths = pathPerPackage[packageName];
+    const tsConfig = packageTsConfigTemplate(paths, packageName);
+
+    const tsConfigPath = vxPath.packageTsConfig(packageName);
+
+    if (isConfigEqual(tsConfigPath, tsConfig)) {
+      logger.log(
+        `✅ tsConfig for package '${packageName}' is unchanged. Skipping.`
+      );
+      return;
+    }
+
+    writeTsConfig(tsConfigPath, tsConfig);
+  });
 };
 
-function tsConfigTemplate() {
+function isConfigEqual(path, tsConfig) {
+  let prev;
+
+  try {
+    prev = require(path);
+  } catch (e) {
+    prev = {};
+  }
+
+  return lodash.isEqual(prev, tsConfig);
+}
+
+function writeTsConfig(path, tsConfig) {
+  logger.log(`Writing ts config to ${path}`);
+
+  writeJSONSync(path, tsConfig, { spaces: 2 });
+
+  fs.writeFileSync(path, JSON.stringify(tsConfig, null, 2));
+
+  exec(`yarn prettier ${path} -w`);
+}
+
+function packageTsConfigTemplate(paths = []) {
+  return {
+    extends: '../../tsconfig.json',
+    rootDir: '.',
+    compilerOptions: {
+      baseUrl: '.',
+      declarationMap: true,
+      declarationDir: './types',
+      outDir: './dist',
+      paths,
+    },
+  };
+}
+
+function rootTsConfigTemplate(paths = []) {
   return {
     compilerOptions: {
       allowJs: false,
@@ -50,12 +113,13 @@ function tsConfigTemplate() {
       noImplicitThis: true,
       noUnusedLocals: true,
       noUnusedParameters: true,
+      paths,
       rootDir: '.',
       skipLibCheck: true,
       sourceMap: true,
       strict: true,
     },
     files: [`${vxPath.rel(vxPath.JEST_CONFIG_PATH)}/globals.d.ts`],
-    include: [vxPath.rel(vxPath.packageSrc('*', '**/*.ts'))],
+    include: ['./packages/*/src/**/*.ts'],
   };
 }
